@@ -1,0 +1,228 @@
+name: Build and Release DXT
+
+# This workflow builds the CELLxGENE Census MCP DXT package and creates a GitHub release
+# with the .dxt file and accompanying documentation for version tags.
+# For feature branches, it builds and uploads DXT files as artifacts for testing.
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags (e.g., v1.0.0)
+    branches:
+      - 'main'  # Build DXT for main branch
+      - 'feature/**'  # Build DXT for ALL feature branches
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for creating releases
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+        
+    - name: Set up Python
+      run: uv python install 3.11
+      
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Extract version and branch info
+      id: version
+      run: |
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/v}
+          IS_RELEASE=true
+          BRANCH_TYPE="release"
+        elif [[ "${{ github.ref }}" == refs/heads/main ]]; then
+          VERSION="main-$(date +%Y%m%d-%H%M%S)"
+          IS_RELEASE=false
+          BRANCH_TYPE="main"
+        elif [[ "${{ github.ref }}" == refs/heads/feature/* ]]; then
+          # Extract feature branch name and create version
+          BRANCH_NAME="${{ github.ref_name }}"
+          FEATURE_NAME=$(echo "$BRANCH_NAME" | sed 's/feature\///' | sed 's/\//-/g' | sed 's/_/-/g')
+          VERSION="feature-${FEATURE_NAME}-$(date +%Y%m%d-%H%M%S)"
+          IS_RELEASE=false
+          BRANCH_TYPE="feature"
+        else
+          VERSION="dev-$(date +%Y%m%d-%H%M%S)"
+          IS_RELEASE=false
+          BRANCH_TYPE="other"
+        fi
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "is_release=$IS_RELEASE" >> $GITHUB_OUTPUT
+        echo "branch_type=$BRANCH_TYPE" >> $GITHUB_OUTPUT
+        echo "branch_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        
+        echo "Build Configuration:"
+        echo "  - Version: $VERSION"
+        echo "  - Is Release: $IS_RELEASE"
+        echo "  - Branch Type: $BRANCH_TYPE"
+        echo "  - Branch Name: ${{ github.ref_name }}"
+        
+    - name: Build DXT package
+      run: |
+        echo "🔨 Building DXT package for ${{ steps.version.outputs.branch_type }} branch..."
+        cd build-dxt
+        make build VERSION=${{ steps.version.outputs.version }}
+        
+        # Verify the DXT was built
+        ls -la dist/
+        echo "✅ DXT package built successfully"
+        
+    - name: Test DXT package
+      run: |
+        echo "🧪 Testing DXT package..."
+        cd build-dxt
+        make test VERSION=${{ steps.version.outputs.version }}
+        echo "✅ DXT package tested successfully"
+        
+    - name: Upload DXT artifact for feature branches
+      if: steps.version.outputs.branch_type == 'feature'
+      uses: actions/upload-artifact@v4
+      with:
+        name: cellxgene-mcp-${{ steps.version.outputs.version }}-dxt
+        path: build-dxt/dist/cellxgene-mcp-${{ steps.version.outputs.version }}.dxt
+        retention-days: 30
+        
+    - name: Upload DXT artifact for main branch
+      if: steps.version.outputs.branch_type == 'main'
+      uses: actions/upload-artifact@v4
+      with:
+        name: cellxgene-mcp-${{ steps.version.outputs.version }}-dxt
+        path: build-dxt/dist/cellxgene-mcp-${{ steps.version.outputs.version }}.dxt
+        retention-days: 30
+        
+    - name: Prepare release assets
+      if: steps.version.outputs.is_release == 'true'
+      run: |
+        echo "📦 Preparing release assets..."
+        mkdir -p release-assets
+        
+        # Copy DXT file
+        cp build-dxt/dist/cellxgene-mcp-${{ steps.version.outputs.version }}.dxt release-assets/
+        
+        # Copy documentation
+        cp build-dxt/assets/README.md release-assets/
+        cp build-dxt/assets/check-prereqs.sh release-assets/
+        
+        # Make check-prereqs executable
+        chmod +x release-assets/check-prereqs.sh
+        
+        # List what we're releasing
+        echo "Release assets:"
+        ls -la release-assets/
+        
+    - name: Generate release notes
+      if: steps.version.outputs.is_release == 'true'
+      id: release_notes
+      run: |
+        VERSION=${{ steps.version.outputs.version }}
+        cat > release-notes.md << EOF
+        # CELLxGENE Census MCP DXT v${VERSION}
+        
+        ## What's New
+        
+        This release includes the CELLxGENE Census MCP Desktop Extension (DXT) for Claude Desktop.
+        
+        ## Installation
+        
+        1. **Download the assets** from this release
+        2. **Run prerequisites check**: \`./check-prereqs.sh\`
+        3. **Install the DXT**: Double-click \`cellxgene-mcp-${VERSION}.dxt\`
+        4. **Start using**: Ask Claude to access CELLxGENE Census data!
+        
+        ## What's Included
+        
+        - \`cellxgene-mcp-${VERSION}.dxt\` - The MCP extension for Claude Desktop
+        - \`README.md\` - Installation and usage instructions  
+        - \`check-prereqs.sh\` - Prerequisites validation script
+        
+        ## System Requirements
+        
+        - **Python 3.10+** (required for the MCP server)
+        - **Internet connection** (for accessing CELLxGENE Census data)
+        - **Claude Desktop** (latest version recommended)
+        
+        ## Features
+        
+        - Access to **100+ million cells** from human and mouse single-cell data
+        - **Rich metadata** including cell types, tissues, diseases, and more
+        - **Efficient filtering** and querying of Census data
+        - **S3-optimized** data transfer for large datasets
+        
+        ## Available Tools
+        
+        - \`get_census_info\` - Get information about available Census versions and organisms
+        - \`get_obs_metadata\` - Retrieve cell (observation) metadata
+        - \`get_var_metadata\` - Retrieve gene (variable) metadata
+        - \`get_data_slice\` - Get summary data slices based on filters
+        - \`get_all_cell_types\` - List all available cell types
+        
+        ## Security
+        
+        - Runs locally on your machine - no external services involved
+        - Your data queries stay private
+        - No authentication required for public Census data
+        
+        For detailed instructions, see the included README.md file.
+        EOF
+        
+        echo "release_notes<<EOF" >> $GITHUB_OUTPUT
+        cat release-notes.md >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+    - name: Create GitHub Release
+      if: steps.version.outputs.is_release == 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        name: "CELLxGENE Census MCP DXT v${{ steps.version.outputs.version }}"
+        body: ${{ steps.release_notes.outputs.release_notes }}
+        files: |
+          release-assets/cellxgene-mcp-${{ steps.version.outputs.version }}.dxt
+          release-assets/README.md
+          release-assets/check-prereqs.sh
+        draft: false
+        prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+        generate_release_notes: false
+        
+    - name: Output build info
+      run: |
+        echo "=================================================="
+        if [[ "${{ steps.version.outputs.is_release }}" == "true" ]]; then
+          echo "✅ Release created successfully!"
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo "Tag: ${{ github.ref }}"
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+        elif [[ "${{ steps.version.outputs.branch_type }}" == "feature" ]]; then
+          echo "✅ Feature branch DXT built successfully!"
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Feature: $(echo ${{ github.ref_name }} | sed 's/feature\///')"
+          echo "DXT artifact uploaded for testing and validation"
+          echo "Download from: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        elif [[ "${{ steps.version.outputs.branch_type }}" == "main" ]]; then
+          echo "✅ Main branch DXT built successfully!"
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "DXT artifact uploaded for testing"
+          echo "Download from: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        else
+          echo "✅ Development DXT built successfully!"
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "DXT artifact uploaded for testing"
+          echo "Download from: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        fi
+        echo "=================================================="

@@ -1,0 +1,135 @@
+name: Manual DXT Builder
+
+# This workflow allows manual triggering to build DXT files
+# for any branch, commit, or specific version
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build from (default: current branch)'
+        required: false
+        default: ''
+      version:
+        description: 'Custom version string (default: auto-generated)'
+        required: false
+        default: ''
+      commit:
+        description: 'Specific commit SHA to build from (optional)'
+        required: false
+        default: ''
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'feature'
+        type: choice
+        options:
+          - feature
+          - main
+          - release
+          - custom
+
+jobs:
+  manual-dxt-build:
+    runs-on: ubuntu-latest
+    name: Manual DXT Build
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.branch || github.ref }}
+        fetch-depth: 0  # Fetch full history for commit access
+        
+    - name: Checkout specific commit (if provided)
+      if: github.event.inputs.commit != ''
+      run: |
+        echo "Checking out specific commit: ${{ github.event.inputs.commit }}"
+        git checkout ${{ github.event.inputs.commit }}
+        
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+        
+    - name: Set up Python
+      run: uv python install 3.11
+      
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Extract build information
+      id: build_info
+      run: |
+        BRANCH_NAME="${{ github.ref_name }}"
+        COMMIT_SHORT="${{ github.sha }}" && COMMIT_SHORT="${COMMIT_SHORT:0:8}"
+        BUILD_TYPE="${{ github.event.inputs.build_type }}"
+        
+        # Generate version based on build type
+        if [[ "${{ github.event.inputs.version }}" != "" ]]; then
+          VERSION="${{ github.event.inputs.version }}"
+        elif [[ "$BUILD_TYPE" == "feature" ]]; then
+          FEATURE_NAME=$(echo "$BRANCH_NAME" | sed 's/feature\///' | sed 's/\//-/g' | sed 's/_/-/g')
+          VERSION="manual-feature-${FEATURE_NAME}-$(date +%Y%m%d-%H%M%S)"
+        elif [[ "$BUILD_TYPE" == "main" ]]; then
+          VERSION="manual-main-$(date +%Y%m%d-%H%M%S)"
+        elif [[ "$BUILD_TYPE" == "release" ]]; then
+          VERSION="manual-release-$(date +%Y%m%d-%H%M%S)"
+        else
+          VERSION="manual-custom-$(date +%Y%m%d-%H%M%S)"
+        fi
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+        echo "commit_short=$COMMIT_SHORT" >> $GITHUB_OUTPUT
+        echo "build_type=$BUILD_TYPE" >> $GITHUB_OUTPUT
+        
+        echo "Manual Build Configuration:"
+        echo "  - Branch: $BRANCH_NAME"
+        echo "  - Commit: $COMMIT_SHORT"
+        echo "  - Build Type: $BUILD_TYPE"
+        echo "  - Version: $VERSION"
+        echo "  - Triggered by: ${{ github.actor }}
+        
+    - name: Build DXT package
+      run: |
+        echo "🔨 Building DXT package manually..."
+        cd build-dxt
+        make build VERSION=${{ steps.build_info.outputs.version }}
+        
+        # Verify the DXT was built
+        ls -la dist/
+        echo "✅ DXT package built successfully"
+        
+    - name: Test DXT package
+      run: |
+        echo "🧪 Testing DXT package..."
+        cd build-dxt
+        make test VERSION=${{ steps.build_info.outputs.version }}
+        echo "✅ DXT package tested successfully"
+        
+    - name: Upload DXT artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: cellxgene-mcp-manual-${{ steps.build_info.outputs.build_type }}-${{ steps.build_info.outputs.commit_short }}-dxt
+        path: build-dxt/dist/cellxgene-mcp-${{ steps.build_info.outputs.version }}.dxt
+        retention-days: 90  # Keep manual builds longer
+        
+    - name: Create build summary
+      run: |
+        echo "=================================================="
+        echo "🎉 Manual DXT Build Complete!"
+        echo "=================================================="
+        echo "Build Type: ${{ steps.build_info.outputs.build_type }}"
+        echo "Version: ${{ steps.build_info.outputs.version }}"
+        echo "Branch: ${{ steps.build_info.outputs.branch_name }}"
+        echo "Commit: ${{ steps.build_info.outputs.commit_short }}"
+        echo "Triggered by: ${{ github.actor }}
+        echo ""
+        echo "DXT package uploaded as artifact:"
+        echo "cellxgene-mcp-manual-${{ steps.build_info.outputs.build_type }}-${{ steps.build_info.outputs.commit_short }}-dxt"
+        echo ""
+        echo "Download from: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        echo "=================================================="
