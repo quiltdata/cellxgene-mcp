@@ -262,4 +262,4 @@ MIT License - see LICENSE file for details.
 
 - File issues on the GitHub repository
 - Check the [CELLxGENE Census documentation](https://chanzuckerberg.github.io/cellxgene-census/) for data questions
-- Review the [MCP specification](https://spec.modelcontextprotocol.io/) for protocol questions 
+- Review the [MCP specification](https://spec.modelcontextprotocol.io/) for protocol questions # Feature branch renamed to trigger DXT builds
