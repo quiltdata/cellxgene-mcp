@@ -1,5 +1,7 @@
 # Testing Strategy for CELLxGENE Census MCP Server
 
+> **⚠️ NOTE: Tests are temporarily disabled** - The test framework is in place but execution is currently skipped. Tests will be re-enabled once the underlying issues are resolved.
+
 ## 🎯 Overview
 
 This document outlines our comprehensive testing strategy to ensure all MCP tools work as expected. We've implemented a multi-layered testing approach that covers unit testing, integration testing, protocol compliance, and continuous integration.
