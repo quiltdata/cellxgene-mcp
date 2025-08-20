@@ -10,6 +10,8 @@ import sys
 import argparse
 import tempfile
 import json
+import boto3
+from botocore.exceptions import NoCredentialsError, ClientError
 
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
@@ -30,12 +32,29 @@ class QueryResult(BaseModel):
     count: int = Field(description="Number of rows returned")
     query_info: Dict[str, Any] = Field(description="Information about the query that was executed")
 
+class S3DataReference(BaseModel):
+    """Reference to data stored in S3."""
+    uri: str = Field(description="S3 URI of the data")
+    bucket: str = Field(description="S3 bucket name")
+    key: str = Field(description="S3 object key")
+    region: str = Field(description="S3 region")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata about the data")
+
+class S3TransferResult(BaseModel):
+    """Result of an S3-to-S3 transfer operation."""
+    source_uri: str = Field(description="Source S3 URI")
+    destination_uri: str = Field(description="Destination S3 URI")
+    transfer_size: int = Field(description="Size of transferred data in bytes")
+    success: bool = Field(description="Whether the transfer was successful")
+    message: str = Field(description="Status message or error description")
+
 class CensusManager:
     """Manages CELLxGENE Census connections and queries."""
     
     def __init__(self, census_version: Optional[str] = None):
         self.census_version = census_version
         self._census = None
+        self._s3_client = None
     
     async def __aenter__(self):
         """Async context manager entry."""
@@ -46,15 +65,185 @@ class CensusManager:
         if self._census:
             self._census.close()
     
-    @asynccontextmanager
-    async def get_census(self):
+    def get_census(self):
         """Get a Census connection."""
         try:
+            # If no specific version is provided, try to get the latest available
+            if self.census_version is None:
+                try:
+                    versions = cellxgene_census.get_census_version_directory()
+                    if versions:
+                        # versions is an OrderedDict, get the 'stable' version if available
+                        if 'stable' in versions:
+                            self.census_version = versions['stable']['release_build']
+                        elif 'latest' in versions:
+                            self.census_version = versions['latest']['release_build']
+                        else:
+                            # Fall back to the first available version
+                            first_key = next(iter(versions))
+                            self.census_version = versions[first_key]['release_build']
+                except Exception:
+                    # If we can't get versions, use a default
+                    self.census_version = "latest"
+            
             census = cellxgene_census.open_soma(census_version=self.census_version)
-            yield census
-        finally:
-            if census:
-                census.close()
+            return census
+        except Exception as e:
+            raise RuntimeError(f"Failed to open Census: {e}")
+    
+    def get_s3_client(self, region: str = "us-west-2"):
+        """Get an S3 client for the specified region."""
+        if self._s3_client is None or self._s3_client.meta.region_name != region:
+            try:
+                self._s3_client = boto3.client('s3', region_name=region)
+            except NoCredentialsError:
+                # For public data access, we can use unsigned requests
+                from botocore import UNSIGNED
+                from botocore.config import Config
+                self._s3_client = boto3.client('s3', 
+                                             region_name=region,
+                                             config=Config(signature_version=UNSIGNED))
+        return self._s3_client
+    
+    def parse_s3_uri(self, s3_uri: str) -> tuple[str, str, str]:
+        """Parse S3 URI into bucket, key, and region components."""
+        if not s3_uri.startswith("s3://"):
+            raise ValueError(f"Invalid S3 URI format: {s3_uri}")
+        
+        # Remove s3:// prefix
+        path = s3_uri[5:]
+        parts = path.split('/', 1)
+        
+        if len(parts) != 2:
+            raise ValueError(f"Invalid S3 URI format: {s3_uri}")
+            
+        bucket = parts[0]
+        key = parts[1]
+        
+        # Extract region from bucket name if it follows Census naming convention
+        region = "us-west-2"  # Default for CELLxGENE Census
+        if "us-west-2" in bucket:
+            region = "us-west-2"
+        elif "us-east-1" in bucket:
+            region = "us-east-1"
+            
+        return bucket, key, region
+    
+    async def get_s3_data_reference(self, organism: str = "Homo sapiens", data_type: str = "obs") -> S3DataReference:
+        """Get S3 reference for Census data without downloading."""
+        with start_action(action_type="get_s3_data_reference", organism=organism, data_type=data_type) as action:
+            try:
+                # Get version directory to find S3 URIs
+                versions = cellxgene_census.get_census_version_directory()
+                if not versions:
+                    raise RuntimeError("No Census versions available")
+                
+                # Use stable version if available, otherwise latest
+                version_key = 'stable' if 'stable' in versions else 'latest'
+                version_info = versions[version_key]
+                
+                # Extract S3 URI information
+                soma_uri = version_info['soma']['uri']
+                region = version_info['soma']['s3_region']
+                
+                # Construct data-specific S3 path
+                organism_key = organism.lower().replace(" ", "_")
+                data_path = f"{soma_uri}census_data/{organism_key}/{data_type}/"
+                
+                bucket, key, _ = self.parse_s3_uri(data_path)
+                
+                s3_ref = S3DataReference(
+                    uri=data_path,
+                    bucket=bucket,
+                    key=key,
+                    region=region,
+                    metadata={
+                        "organism": organism,
+                        "data_type": data_type,
+                        "census_version": version_info['release_build'],
+                        "version_key": version_key
+                    }
+                )
+                
+                action.add_success_fields(uri=data_path, organism=organism, data_type=data_type)
+                return s3_ref
+                
+            except Exception as e:
+                action.log(message_type="s3_reference_failed", error=str(e))
+                raise
+    
+    async def list_s3_objects(self, s3_reference: S3DataReference, max_keys: int = 1000) -> List[Dict[str, Any]]:
+        """List objects in S3 without downloading them."""
+        with start_action(action_type="list_s3_objects", bucket=s3_reference.bucket, key=s3_reference.key) as action:
+            try:
+                s3_client = self.get_s3_client(s3_reference.region)
+                
+                response = s3_client.list_objects_v2(
+                    Bucket=s3_reference.bucket,
+                    Prefix=s3_reference.key,
+                    MaxKeys=max_keys
+                )
+                
+                objects = []
+                if 'Contents' in response:
+                    for obj in response['Contents']:
+                        objects.append({
+                            'key': obj['Key'],
+                            'size': obj['Size'],
+                            'last_modified': obj['LastModified'].isoformat(),
+                            'etag': obj['ETag'].strip('"'),
+                            's3_uri': f"s3://{s3_reference.bucket}/{obj['Key']}"
+                        })
+                
+                action.add_success_fields(object_count=len(objects))
+                return objects
+                
+            except Exception as e:
+                action.log(message_type="s3_list_failed", error=str(e))
+                raise
+    
+    async def prepare_s3_transfer(self, source_s3_uri: str, destination_bucket: str, destination_key: str) -> S3TransferResult:
+        """Prepare an S3-to-S3 transfer operation."""
+        with start_action(action_type="prepare_s3_transfer", source=source_s3_uri, destination=f"s3://{destination_bucket}/{destination_key}") as action:
+            try:
+                source_bucket, source_key, source_region = self.parse_s3_uri(source_s3_uri)
+                destination_uri = f"s3://{destination_bucket}/{destination_key}"
+                
+                # Get source object info
+                s3_client = self.get_s3_client(source_region)
+                
+                try:
+                    response = s3_client.head_object(Bucket=source_bucket, Key=source_key)
+                    transfer_size = response['ContentLength']
+                    
+                    # For this implementation, we'll return the transfer information
+                    # In a real implementation, you'd initiate the actual S3-to-S3 copy
+                    result = S3TransferResult(
+                        source_uri=source_s3_uri,
+                        destination_uri=destination_uri,
+                        transfer_size=transfer_size,
+                        success=True,
+                        message=f"Transfer prepared: {transfer_size} bytes from {source_s3_uri} to {destination_uri}"
+                    )
+                    
+                    action.add_success_fields(transfer_size=transfer_size)
+                    return result
+                    
+                except ClientError as e:
+                    if e.response['Error']['Code'] == '404':
+                        return S3TransferResult(
+                            source_uri=source_s3_uri,
+                            destination_uri=destination_uri,
+                            transfer_size=0,
+                            success=False,
+                            message=f"Source object not found: {source_s3_uri}"
+                        )
+                    else:
+                        raise
+                        
+            except Exception as e:
+                action.log(message_type="s3_transfer_prep_failed", error=str(e))
+                raise
     
     async def get_obs_metadata(
         self, 
@@ -66,7 +255,8 @@ class CensusManager:
         """Get observation (cell) metadata from Census."""
         with start_action(action_type="get_obs_metadata", organism=organism, value_filter=value_filter) as action:
             try:
-                async with self.get_census() as census:
+                census = self.get_census()
+                try:
                     obs_df = cellxgene_census.get_obs(
                         census=census,
                         organism=organism,
@@ -95,6 +285,8 @@ class CensusManager:
                     
                     action.add_success_fields(rows_count=len(rows))
                     return result
+                finally:
+                    census.close()
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
                 raise
@@ -109,7 +301,8 @@ class CensusManager:
         """Get variable (gene) metadata from Census."""
         with start_action(action_type="get_var_metadata", organism=organism, value_filter=value_filter) as action:
             try:
-                async with self.get_census() as census:
+                census = self.get_census()
+                try:
                     var_df = cellxgene_census.get_var(
                         census=census,
                         organism=organism,
@@ -138,6 +331,8 @@ class CensusManager:
                     
                     action.add_success_fields(rows_count=len(rows))
                     return result
+                finally:
+                    census.close()
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
                 raise
@@ -155,7 +350,8 @@ class CensusManager:
         """Get a slice of Census data as AnnData summary."""
         with start_action(action_type="get_anndata_slice", organism=organism) as action:
             try:
-                async with self.get_census() as census:
+                census = self.get_census()
+                try:
                     # Get a slice of the data
                     adata = cellxgene_census.get_anndata(
                         census=census,
@@ -196,6 +392,8 @@ class CensusManager:
                     
                     action.add_success_fields(n_obs=adata.n_obs, n_vars=adata.n_vars)
                     return result
+                finally:
+                    census.close()
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
                 raise
@@ -305,20 +503,31 @@ Note: Queries can return large amounts of data. Use filters to limit results.
         with start_action(action_type="get_census_info") as action:
             try:
                 # Get available Census versions
-                versions = cellxgene_census.get_census_version_directory()
+                try:
+                    versions = cellxgene_census.get_census_version_directory()
+                except Exception as version_error:
+                    action.log(message_type="version_directory_failed", error=str(version_error))
+                    versions = []
                 
                 # Get information about the current/latest version
                 latest_version = None
                 if versions:
-                    # Find the latest stable version
-                    stable_versions = [v for v in versions if v.get('flags', {}).get('lts', False)]
-                    if stable_versions:
-                        latest_version = stable_versions[-1]['release_build']
+                    # versions is an OrderedDict, get the 'stable' version if available
+                    if 'stable' in versions:
+                        latest_version = versions['stable']['release_build']
+                    elif 'latest' in versions:
+                        latest_version = versions['latest']['release_build']
                     else:
-                        latest_version = versions[-1]['release_build']
+                        # Fall back to the first available version
+                        try:
+                            first_key = next(iter(versions))
+                            latest_version = versions[first_key]['release_build']
+                        except (IndexError, KeyError, StopIteration):
+                            latest_version = None
                 
                 # Actually open Census to get real information
-                async with self.census_manager.get_census() as census:
+                census = self.census_manager.get_census()
+                try:
                     # Get actual organisms available in the Census
                     organisms = list(census["census_data"].keys())
                     
@@ -361,7 +570,7 @@ Note: Queries can return large amounts of data. Use filters to limit results.
                         action.log(message_type="summary_query_failed", error=str(summary_error))
                     
                     result = {
-                        "available_versions": [v['release_build'] for v in versions] if versions else [],
+                        "available_versions": versions if versions else [],
                         "latest_stable_version": latest_version,
                         "supported_organisms": organisms,
                         "organism_statistics": organism_stats,
@@ -369,13 +578,15 @@ Note: Queries can return large amounts of data. Use filters to limit results.
                         "census_summary": summary_info,
                         "version_info": versions if versions else []
                     }
-                
-                action.add_success_fields(
-                    versions_count=len(versions) if versions else 0,
-                    organisms_count=len(organisms),
-                    total_cells=total_cells
-                )
-                return result
+                    
+                    action.add_success_fields(
+                        versions_count=len(versions) if versions else 0,
+                        organisms_count=len(organisms),
+                        total_cells=total_cells
+                    )
+                    return result
+                finally:
+                    census.close()
                 
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
@@ -460,7 +671,8 @@ Note: Queries can return large amounts of data. Use filters to limit results.
         """Get all distinct cell types from Census."""
         with start_action(action_type="get_all_cell_types", organism=organism) as action:
             try:
-                async with self.census_manager.get_census() as census:
+                census = self.census_manager.get_census()
+                try:
                     # Build value filter
                     value_filter = None
                     if primary_data_only:
@@ -496,7 +708,8 @@ Note: Queries can return large amounts of data. Use filters to limit results.
                         total_cells=len(obs_df)
                     )
                     return result
-                    
+                finally:
+                    census.close()
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
                 raise
