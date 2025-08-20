@@ -1,0 +1,42 @@
+{
+  "dxt_version": "0.1",
+  "name": "cellxgene-mcp",
+  "version": "0.1.0",
+  "description": "Access CELLxGENE Census data through Claude Desktop using MCP",
+  "author": {
+    "name": "Quilt Data, Inc.",
+    "email": "support@quiltdata.com"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/quiltdata/cellxgene-mcp"
+  },
+  "icon": "icon.png",
+  "server": {
+    "type": "python",
+    "entry_point": "bootstrap.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": ["${__dirname}/bootstrap.py"],
+      "env": {
+        "PYTHONNOUSERSITE": "1"
+      }
+    }
+  },
+  "user_config": {
+    "census_version": {
+      "type": "string",
+      "title": "Census Version",
+      "description": "Specific CELLxGENE Census version to use (leave empty for latest)",
+      "required": false
+    },
+    "log_level": {
+      "type": "string",
+      "title": "Log Level",
+      "description": "Set logging verbosity (info, debug, error)",
+      "required": false,
+      "default": "info"
+    }
+  }
+}
