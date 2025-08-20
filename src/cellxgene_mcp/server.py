@@ -642,6 +642,12 @@ class CellxGeneMCP(FastMCP):
             name=f"{self.prefix}check_s3_access", 
             description="Check S3 access to Census data. Verifies connectivity and lists available data without downloading."
         )(self.check_s3_access)
+        
+        # New Quilt integration tool
+        self.tool(
+            name=f"{self.prefix}get_quilt_s3_paths", 
+            description="Get S3 paths specifically formatted for Quilt MCP tools. Returns S3 URIs that can be passed directly to Quilt package creation tools."
+        )(self.get_quilt_s3_paths)
     
     def _register_cellxgene_resources(self):
         """Register CELLxGENE Census-specific resources."""
@@ -927,27 +933,42 @@ Note: H5AD files can be large. Use appropriate storage and memory management.
                         "value_filter": value_filter,
                         "column_names": columns,
                         "limited": False,
-                        "note": "S3-based access - use provided S3 paths for data access",
+                        "note": "S3-based access - use provided S3 paths for Quilt package creation",
                         "s3_access": {
                             "bucket": base_bucket,
                             "version": latest_version,
                             "organism_key": organism_key,
-                            "soma_path": soma_path,
+                            "s3_path": soma_path,
                             "h5ads_path": h5ads_path,
                             "organism_accessible": organism_accessible
+                        },
+                        "quilt_integration": {
+                            "s3_uris_for_quilt": [
+                                f"s3://{base_bucket}/cell-census/{latest_version}/soma/",
+                                f"s3://{base_bucket}/cell-census/{latest_version}/h5ads/",
+                                f"s3://{base_bucket}/cell-census/{latest_version}/soma/census_data/{organism_key}/"
+                            ],
+                            "quilt_package_suggestions": [
+                                f"Use s3://{base_bucket}/cell-census/{latest_version}/h5ads/ for individual H5AD files",
+                                f"Use s3://{base_bucket}/cell-census/{latest_version}/soma/ for full Census data",
+                                f"Use s3://{base_bucket}/cell-census/{latest_version}/soma/census_data/{organism_key}/ for organism-specific data"
+                            ],
+                            "quilt_mcp_ready": True
                         },
                         "access_methods": [
                             "Direct S3 access via AWS CLI",
                             "Download H5AD files for local analysis",
-                            "Use TileDB-SOMA API with S3 URIs"
+                            "Use TileDB-SOMA API with S3 URIs",
+                            "Pass S3 URIs directly to Quilt MCP tools"
                         ],
                         "aws_cli_examples": {
                             "download_soma": f"aws s3 sync --no-sign-request {soma_path} ./soma/",
                             "download_h5ads": f"aws s3 sync --no-sign-request {h5ads_path} ./h5ads/",
-                            "list_organism_data": f"aws s3 ls --no-sign-request {soma_path}"
+                            "list_organism_data": f"aws s3 ls --no-sign-request {soma_path}",
+                            "list_h5ad_files": f"aws s3 ls --no-sign-request {h5ads_path} --recursive | grep .h5ad"
                         },
                         "python_example": f"""
-# For direct S3 access with TileDB-SOMA:
+# For direct S3 access with TileDB-SOMA (then upload to Quilt):
 import tiledbsoma
 import cellxgene_census
 
@@ -961,6 +982,25 @@ obs_df = cellxgene_census.get_obs(
     value_filter="{value_filter or 'None'}",
     column_names={columns or 'None'}
 )
+
+# Now you can process this data and upload to Quilt using Quilt MCP tools
+# The S3 URIs above can be passed directly to Quilt package creation tools
+""",
+                        "quilt_workflow": f"""
+# Recommended Quilt Package Creation Workflow:
+
+1. Use the S3 URIs above with Quilt MCP tools:
+   - soma: s3://{base_bucket}/cell-census/{latest_version}/soma/
+   - h5ads: s3://{base_bucket}/cell-census/{latest_version}/h5ads/
+   - organism-specific: s3://{base_bucket}/cell-census/{latest_version}/soma/census_data/{organism_key}/
+
+2. For H5AD files (recommended for Quilt):
+   - List available files: aws s3 ls --no-sign-request s3://{base_bucket}/cell-census/{latest_version}/h5ads/ --recursive
+   - Download specific files or use S3 URIs directly in Quilt
+
+3. For full Census data:
+   - Use the soma/ path for comprehensive data access
+   - Process with TileDB-SOMA then upload results to Quilt
 """
                     }
                 )
@@ -1602,6 +1642,78 @@ var_df = cellxgene_census.get_var(
                 action.log(message_type="s3_access_check_failed", error=str(e))
                 return {
                     "s3_access": "failed",
+                    "error": str(e),
+                    "api_status": "error"
+                }
+
+    async def get_quilt_s3_paths(self, version: str) -> Dict[str, Any]:
+        """Get S3 paths specifically formatted for Quilt MCP tools."""
+        with start_action(action_type="get_quilt_s3_paths", version=version) as action:
+            try:
+                base_bucket = "cellxgene-census-public-us-west-2"
+                base_prefix = f"cell-census/{version}/"
+                
+                s3_client = self.census_manager.get_s3_client(region="us-west-2")
+                
+                # Check if version exists
+                response = s3_client.list_objects_v2(
+                    Bucket=base_bucket,
+                    Prefix=base_prefix,
+                    MaxKeys=1
+                )
+                
+                if not response.get('Contents'):
+                    return {
+                        "version": version,
+                        "exists": False,
+                        "error": f"Version {version} not found in S3",
+                        "api_status": "error"
+                    }
+                
+                # Get organism-specific paths
+                organisms = ["homo_sapiens", "mus_musculus"]
+                organism_paths = {}
+                
+                for organism in organisms:
+                    organism_prefix = f"{base_prefix}soma/census_data/{organism}/"
+                    org_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix=organism_prefix,
+                        MaxKeys=5
+                    )
+                    
+                    organism_paths[organism] = {
+                        "s3_path": f"s3://{base_bucket}/{organism_prefix}",
+                        "accessible": len(org_response.get('Contents', [])) > 0,
+                        "sample_keys": [obj['Key'] for obj in org_response.get('Contents', [])[:3]]
+                    }
+                
+                result = {
+                    "version": version,
+                    "exists": True,
+                    "s3_bucket": base_bucket,
+                    "s3_region": "us-west-2",
+                    "paths": {
+                        "base": f"s3://{base_bucket}/{base_prefix}",
+                        "soma": f"s3://{base_bucket}/{base_prefix}soma/",
+                        "h5ads": f"s3://{base_bucket}/{base_prefix}h5ads/",
+                        "organisms": organism_paths
+                    },
+                    "aws_cli_examples": {
+                        "download_soma": f"aws s3 sync --no-sign-request s3://{base_bucket}/{base_prefix}soma/ ./soma/",
+                        "download_h5ads": f"aws s3 sync --no-sign-request s3://{base_bucket}/{base_prefix}h5ads/ ./h5ads/"
+                    },
+                    "api_status": "success"
+                }
+                
+                action.add_success_fields(version=version)
+                return result
+                
+            except Exception as e:
+                action.log(message_type="s3_paths_failed", error=str(e))
+                return {
+                    "version": version,
+                    "exists": False,
                     "error": str(e),
                     "api_status": "error"
                 }
