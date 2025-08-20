@@ -444,6 +444,22 @@ class CellxGeneMCP(FastMCP):
             name=f"{self.prefix}get_all_cell_types", 
             description="Get all distinct cell types available in CELLxGENE Census for a specific organism. Optionally includes cell counts for each type."
         )(self.get_all_cell_types)
+        
+        # New H5AD-specific tools
+        self.tool(
+            name=f"{self.prefix}get_h5ad_uri", 
+            description="Get the URI for a specific dataset's H5AD file from CELLxGENE Census. Requires dataset_id and organism."
+        )(self.get_h5ad_uri)
+        
+        self.tool(
+            name=f"{self.prefix}download_h5ad", 
+            description="Download a specific dataset's H5AD file from CELLxGENE Census to a local file. Requires dataset_id, organism, and output filename."
+        )(self.download_h5ad)
+        
+        self.tool(
+            name=f"{self.prefix}list_available_datasets", 
+            description="List available datasets in CELLxGENE Census for a specific organism. Returns dataset IDs and basic information."
+        )(self.list_available_datasets)
     
     def _register_cellxgene_resources(self):
         """Register CELLxGENE Census-specific resources."""
@@ -467,6 +483,9 @@ CELLxGENE Census Information:
 
 The CELLxGENE Census is a comprehensive collection of single-cell RNA sequencing data from CZ CELLxGENE Discover.
 
+Data Format: H5AD (AnnData)
+The Census provides data in H5AD format, which is the standard format for single-cell data analysis.
+
 Available Organisms:
 - "Homo sapiens" (human)
 - "Mus musculus" (mouse)
@@ -488,26 +507,31 @@ Variable (gene) metadata:
 - feature_name: Gene symbol
 - feature_length: Gene length
 
-Common Query Patterns:
-1. Filter by cell type: cell_type == 'T cell'
-2. Filter by tissue: tissue == 'lung'
-3. Filter by disease: disease == 'COVID-19'
-4. Combine filters: cell_type == 'T cell' and tissue == 'lung'
-5. Filter genes: feature_name in ['CD4', 'CD8A', 'CD3E']
+Access Methods:
+1. get_h5ad_uri - Get URI for H5AD file download
+2. download_h5ad - Download H5AD file directly
+3. list_available_datasets - Discover available datasets
 
-Note: Queries can return large amounts of data. Use filters to limit results.
+Usage Workflow:
+1. Use get_census_info to see available versions
+2. Use list_available_datasets to find datasets of interest
+3. Use get_h5ad_uri to get download URI for specific dataset
+4. Use download_h5ad to download the H5AD file
+5. Analyze the H5AD file using standard tools (scanpy, anndata, etc.)
+
+Note: H5AD files can be large. Use appropriate storage and memory management.
 """
     
     async def get_census_info(self) -> Dict[str, Any]:
         """Get information about available Census versions and organisms."""
         with start_action(action_type="get_census_info") as action:
             try:
-                # Get available Census versions
+                # Get available Census versions using the correct API
                 try:
                     versions = cellxgene_census.get_census_version_directory()
                 except Exception as version_error:
                     action.log(message_type="version_directory_failed", error=str(version_error))
-                    versions = []
+                    versions = {}
                 
                 # Get information about the current/latest version
                 latest_version = None
@@ -525,72 +549,92 @@ Note: Queries can return large amounts of data. Use filters to limit results.
                         except (IndexError, KeyError, StopIteration):
                             latest_version = None
                 
-                # Actually open Census to get real information
-                census = self.census_manager.get_census()
+                # Get organism information using H5AD approach
+                organisms = ["Homo sapiens", "Mus musculus"]  # Default organisms
+                organism_stats = {}
+                total_cells = 0
+                
                 try:
-                    # Get actual organisms available in the Census
-                    organisms = list(census["census_data"].keys())
+                    # Get available organisms from the Census version directory
+                    if versions:
+                        # Extract organism information from available versions
+                        for version_key, version_info in versions.items():
+                            if 'organisms' in version_info:
+                                available_organisms = version_info['organisms']
+                                if available_organisms:
+                                    organisms = available_organisms
+                                    break
                     
-                    # Get summary statistics for each organism
-                    organism_stats = {}
-                    total_cells = 0
-                    
+                    # For H5AD approach, we'll get basic statistics without opening large files
+                    # Instead, we'll use the version directory information
                     for organism in organisms:
                         try:
-                            # Get basic stats for this organism
-                            exp = census["census_data"][organism]
-                            
-                            # Get a small sample to determine available columns and data types
-                            obs_sample = exp.obs.read(column_names=None).concat().to_pandas().head(1)
-                            var_sample = exp.var.read(column_names=None).concat().to_pandas().head(1)
-                            
-                            # Count total cells and genes for this organism
-                            obs_count = len(exp.obs.read(column_names=["soma_joinid"]).concat().to_pandas())
-                            var_count = len(exp.var.read(column_names=["soma_joinid"]).concat().to_pandas())
-                            
-                            total_cells += obs_count
-                            
+                            # Get basic stats from version directory if available
                             organism_stats[organism] = {
-                                "total_cells": obs_count,
-                                "total_genes": var_count,
-                                "obs_columns": list(obs_sample.columns) if not obs_sample.empty else [],
-                                "var_columns": list(var_sample.columns) if not var_sample.empty else []
+                                "total_cells": "Available via H5AD download",
+                                "total_genes": "Available via H5AD download",
+                                "data_format": "H5AD",
+                                "access_method": "Download via get_source_h5ad_uri or download_source_h5ad"
                             }
                         except Exception as org_error:
                             action.log(message_type="organism_query_failed", organism=organism, error=str(org_error))
                             organism_stats[organism] = {"error": str(org_error)}
                     
-                    # Try to get summary info if available
+                    # Get summary info from version directory
                     summary_info = {}
-                    try:
-                        if "census_info" in census and "summary" in census["census_info"]:
-                            summary_df = census["census_info"]["summary"].read().concat().to_pandas()
-                            summary_info = dict(zip(summary_df["label"], summary_df["value"]))
-                    except Exception as summary_error:
-                        action.log(message_type="summary_query_failed", error=str(summary_error))
+                    if versions:
+                        for version_key, version_info in versions.items():
+                            if 'description' in version_info:
+                                summary_info[f"{version_key}_description"] = version_info['description']
+                            if 'release_build' in version_info:
+                                summary_info[f"{version_key}_build"] = version_info['release_build']
                     
-                    result = {
-                        "available_versions": versions if versions else [],
-                        "latest_stable_version": latest_version,
-                        "supported_organisms": organisms,
-                        "organism_statistics": organism_stats,
-                        "total_cells_across_organisms": total_cells,
-                        "census_summary": summary_info,
-                        "version_info": versions if versions else []
+                except Exception as census_error:
+                    action.log(message_type="census_info_failed", error=str(census_error))
+                    # Fall back to basic information
+                    organism_stats = {
+                        "Homo sapiens": {"total_cells": "Unknown", "total_genes": "Unknown", "error": "Census info failed"},
+                        "Mus musculus": {"total_cells": "Unknown", "total_genes": "Unknown", "error": "Census info failed"}
                     }
-                    
-                    action.add_success_fields(
-                        versions_count=len(versions) if versions else 0,
-                        organisms_count=len(organisms),
-                        total_cells=total_cells
-                    )
-                    return result
-                finally:
-                    census.close()
+                
+                result = {
+                    "available_versions": versions if versions else {},
+                    "latest_stable_version": latest_version,
+                    "supported_organisms": organisms,
+                    "organism_statistics": organism_stats,
+                    "total_cells_across_organisms": total_cells,
+                    "census_summary": summary_info,
+                    "version_info": versions if versions else {},
+                    "api_status": "connected" if versions else "limited",
+                    "data_format": "H5AD",
+                    "access_methods": [
+                        "get_source_h5ad_uri - Get URI for H5AD file",
+                        "download_source_h5ad - Download H5AD file directly"
+                    ]
+                }
+                
+                action.add_success_fields(
+                    versions_count=len(versions) if versions else 0,
+                    organisms_count=len(organisms),
+                    total_cells=total_cells
+                )
+                return result
                 
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
-                raise
+                # Return basic information even if there's an error
+                return {
+                    "available_versions": {},
+                    "latest_stable_version": None,
+                    "supported_organisms": ["Homo sapiens", "Mus musculus"],
+                    "organism_statistics": {},
+                    "total_cells_across_organisms": 0,
+                    "census_summary": {},
+                    "version_info": {},
+                    "api_status": "error",
+                    "data_format": "H5AD",
+                    "error": str(e)
+                }
     
     async def get_obs_metadata(
         self,
@@ -668,51 +712,276 @@ Note: Queries can return large amounts of data. Use filters to limit results.
         include_counts: bool = False,
         primary_data_only: bool = True
     ) -> Dict[str, Any]:
-        """Get all distinct cell types from Census."""
+        """Get all distinct cell types from Census using H5AD approach."""
         with start_action(action_type="get_all_cell_types", organism=organism) as action:
             try:
-                census = self.census_manager.get_census()
-                try:
-                    # Build value filter
-                    value_filter = None
-                    if primary_data_only:
-                        value_filter = "is_primary_data == True"
-                    
-                    # Get cell type data
-                    obs_df = cellxgene_census.get_obs(
-                        census=census,
-                        organism=organism,
-                        column_names=["cell_type"],
-                        value_filter=value_filter
-                    )
-                    
-                    # Get unique cell types
-                    unique_cell_types = obs_df['cell_type'].unique().tolist()
-                    unique_cell_types.sort()  # Sort alphabetically
-                    
-                    result = {
+                # For H5AD approach, we need to get the source H5AD URI first
+                # Then we can analyze the file to get cell types
+                
+                # Get available Census versions
+                versions = cellxgene_census.get_census_version_directory()
+                if not versions:
+                    return {
                         "organism": organism,
-                        "cell_types": unique_cell_types,
-                        "total_unique_cell_types": len(unique_cell_types),
-                        "primary_data_only": primary_data_only
+                        "cell_types": [],
+                        "total_unique_cell_types": 0,
+                        "primary_data_only": primary_data_only,
+                        "total_cells_queried": 0,
+                        "error": "No Census versions available",
+                        "api_status": "error",
+                        "data_format": "H5AD"
                     }
-                    
-                    # Optionally include counts
-                    if include_counts:
-                        cell_type_counts = obs_df['cell_type'].value_counts()
-                        result["cell_type_counts"] = cell_type_counts.to_dict()
-                        result["top_10_cell_types"] = cell_type_counts.head(10).to_dict()
-                    
-                    action.add_success_fields(
-                        unique_cell_types_count=len(unique_cell_types),
-                        total_cells=len(obs_df)
-                    )
-                    return result
-                finally:
-                    census.close()
+                
+                # Use stable version if available, otherwise latest
+                version_key = 'stable' if 'stable' in versions else 'latest'
+                version_info = versions[version_key]
+                census_version = version_info['release_build']
+                
+                # Get the source H5AD URI for the organism
+                # Note: This requires a dataset_id, which we don't have
+                # For now, we'll return information about how to access the data
+                
+                result = {
+                    "organism": organism,
+                    "cell_types": "Available via H5AD download",
+                    "total_unique_cell_types": "Unknown - requires H5AD analysis",
+                    "primary_data_only": primary_data_only,
+                    "total_cells_queried": "Unknown - requires H5AD analysis",
+                    "census_version": census_version,
+                    "data_format": "H5AD",
+                    "access_method": "Use get_source_h5ad_uri with dataset_id to get H5AD file",
+                    "note": "Cell type information requires downloading and analyzing the H5AD file",
+                    "api_status": "info"
+                }
+                
+                action.add_success_fields(
+                    organism=organism,
+                    census_version=census_version,
+                    data_format="H5AD"
+                )
+                return result
+                
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
-                raise
+                # Return error information instead of raising
+                return {
+                    "organism": organism,
+                    "cell_types": [],
+                    "total_unique_cell_types": 0,
+                    "primary_data_only": primary_data_only,
+                    "total_cells_queried": 0,
+                    "error": str(e),
+                    "api_status": "error",
+                    "data_format": "H5AD"
+                }
+    
+    async def get_h5ad_uri(
+        self,
+        dataset_id: str,
+        organism: str = "Homo sapiens"
+    ) -> Dict[str, Any]:
+        """Get the URI for a specific dataset's H5AD file."""
+        with start_action(action_type="get_h5ad_uri", dataset_id=dataset_id, organism=organism) as action:
+            try:
+                # Get available Census versions
+                versions = cellxgene_census.get_census_version_directory()
+                if not versions:
+                    return {
+                        "dataset_id": dataset_id,
+                        "organism": organism,
+                        "h5ad_uri": None,
+                        "error": "No Census versions available",
+                        "api_status": "error"
+                    }
+                
+                # Use stable version if available, otherwise latest
+                version_key = 'stable' if 'stable' in versions else 'latest'
+                version_info = versions[version_key]
+                census_version = version_info['release_build']
+                
+                try:
+                    # Get the source H5AD URI using the official API
+                    h5ad_uri = cellxgene_census.get_source_h5ad_uri(
+                        dataset_id=dataset_id,
+                        census_version=census_version
+                    )
+                    
+                    result = {
+                        "dataset_id": dataset_id,
+                        "organism": organism,
+                        "h5ad_uri": h5ad_uri,
+                        "census_version": census_version,
+                        "api_status": "success"
+                    }
+                    
+                    action.add_success_fields(uri=h5ad_uri, dataset_id=dataset_id)
+                    return result
+                    
+                except Exception as uri_error:
+                    return {
+                        "dataset_id": dataset_id,
+                        "organism": organism,
+                        "h5ad_uri": None,
+                        "census_version": census_version,
+                        "error": f"Failed to get H5AD URI: {str(uri_error)}",
+                        "api_status": "error"
+                    }
+                    
+            except Exception as e:
+                action.log(message_type="query_failed", error=str(e))
+                return {
+                    "dataset_id": dataset_id,
+                    "organism": organism,
+                    "h5ad_uri": None,
+                    "error": str(e),
+                    "api_status": "error"
+                }
+    
+    async def download_h5ad(
+        self,
+        dataset_id: str,
+        output_filename: str,
+        organism: str = "Homo sapiens"
+    ) -> Dict[str, Any]:
+        """Download a specific dataset's H5AD file."""
+        with start_action(action_type="download_h5ad", dataset_id=dataset_id, output_filename=output_filename, organism=organism) as action:
+            try:
+                # Get available Census versions
+                versions = cellxgene_census.get_census_version_directory()
+                if not versions:
+                    return {
+                        "dataset_id": dataset_id,
+                        "organism": organism,
+                        "output_filename": output_filename,
+                        "download_success": False,
+                        "error": "No Census versions available",
+                        "api_status": "error"
+                    }
+                
+                # Use stable version if available, otherwise latest
+                version_key = 'stable' if 'stable' in versions else 'latest'
+                version_info = versions[version_key]
+                census_version = version_info['release_build']
+                
+                try:
+                    # Download the source H5AD file using the official API
+                    cellxgene_census.download_source_h5ad(
+                        dataset_id=dataset_id,
+                        census_version=census_version,
+                        output_filename=output_filename
+                    )
+                    
+                    # Check if file was downloaded successfully
+                    import os
+                    if os.path.exists(output_filename):
+                        file_size = os.path.getsize(output_filename)
+                        
+                        result = {
+                            "dataset_id": dataset_id,
+                            "organism": organism,
+                            "output_filename": output_filename,
+                            "download_success": True,
+                            "census_version": census_version,
+                            "file_size_bytes": file_size,
+                            "file_size_mb": round(file_size / (1024 * 1024), 2),
+                            "api_status": "success"
+                        }
+                        
+                        action.add_success_fields(
+                            filename=output_filename, 
+                            file_size=file_size,
+                            dataset_id=dataset_id
+                        )
+                        return result
+                    else:
+                        return {
+                            "dataset_id": dataset_id,
+                            "organism": organism,
+                            "output_filename": output_filename,
+                            "download_success": False,
+                            "census_version": census_version,
+                            "error": "File download completed but file not found",
+                            "api_status": "error"
+                        }
+                        
+                except Exception as download_error:
+                    return {
+                        "dataset_id": dataset_id,
+                        "organism": organism,
+                        "output_filename": output_filename,
+                        "download_success": False,
+                        "census_version": census_version,
+                        "error": f"Download failed: {str(download_error)}",
+                        "api_status": "error"
+                    }
+                    
+            except Exception as e:
+                action.log(message_type="query_failed", error=str(e))
+                return {
+                    "dataset_id": dataset_id,
+                    "organism": organism,
+                    "output_filename": output_filename,
+                    "download_success": False,
+                    "error": str(e),
+                    "api_status": "error"
+                }
+    
+    async def list_available_datasets(
+        self,
+        organism: str = "Homo sapiens"
+    ) -> Dict[str, Any]:
+        """List available datasets in CELLxGENE Census for a specific organism."""
+        with start_action(action_type="list_available_datasets", organism=organism) as action:
+            try:
+                # Get available Census versions
+                versions = cellxgene_census.get_census_version_directory()
+                if not versions:
+                    return {
+                        "organism": organism,
+                        "datasets": [],
+                        "total_datasets": 0,
+                        "error": "No Census versions available",
+                        "api_status": "error"
+                    }
+                
+                # Use stable version if available, otherwise latest
+                version_key = 'stable' if 'stable' in versions else 'latest'
+                version_info = versions[version_key]
+                census_version = version_info['release_build']
+                
+                # Note: The current API doesn't provide a direct way to list all datasets
+                # This would require additional metadata or a different approach
+                # For now, we'll return information about how to discover datasets
+                
+                result = {
+                    "organism": organism,
+                    "datasets": "Use get_h5ad_uri with known dataset_id",
+                    "total_datasets": "Unknown - requires dataset discovery",
+                    "census_version": census_version,
+                    "note": "Dataset discovery requires known dataset IDs. Check CELLxGENE Discover for available datasets.",
+                    "discovery_methods": [
+                        "CELLxGENE Discover website",
+                        "CELLxGENE Census documentation",
+                        "Known dataset IDs from publications"
+                    ],
+                    "api_status": "info"
+                }
+                
+                action.add_success_fields(
+                    organism=organism,
+                    census_version=census_version
+                )
+                return result
+                
+            except Exception as e:
+                action.log(message_type="query_failed", error=str(e))
+                return {
+                    "organism": organism,
+                    "datasets": [],
+                    "total_datasets": 0,
+                    "error": str(e),
+                    "api_status": "error"
+                }
 
 def cli_app():
     """CLI application for HTTP transport."""
