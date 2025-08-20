@@ -1,0 +1,18 @@
+# Feature branch DXT builder workflow temporarily disabled
+# name: Feature Branch DXT Builder
+# on:
+#   push:
+#     branches:
+#       - 'feature/**'
+#   pull_request:
+#     branches:
+#       - 'main'
+#       - 'develop'
+#     types: [opened, synchronize, reopened]
+#   workflow_dispatch:
+
+# jobs:
+#   build-feature-dxt:
+#     name: Build Feature Branch DXT
+#     runs-on: ubuntu-latest
+#     # ... rest of workflow disabled

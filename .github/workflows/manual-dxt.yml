@@ -1,0 +1,33 @@
+# Manual DXT builder workflow temporarily disabled
+# name: Manual DXT Builder
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       branch:
+#         description: 'Branch to build from (default: current branch)'
+#         required: false
+#         default: ''
+#       version:
+#         description: 'Custom version string (default: auto-generated)'
+#         required: false
+#         default: ''
+#       commit:
+#         description: 'Specific commit SHA to build from (optional)'
+#         required: false
+#         default: ''
+#       build_type:
+#         description: 'Build type'
+#         required: true
+#         default: 'feature'
+#         type: choice
+#         options:
+#           - feature
+#           - main
+#           - release
+#           - custom
+
+# jobs:
+#   manual-dxt-build:
+#     name: Manual DXT Build
+#     runs-on: ubuntu-latest
+#     # ... rest of workflow disabled
