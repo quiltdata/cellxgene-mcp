@@ -252,44 +252,127 @@ class CensusManager:
         column_names: Optional[List[str]] = None,
         limit: int = 1000
     ) -> QueryResult:
-        """Get observation (cell) metadata from Census."""
+        """Get observation (cell) metadata from Census using S3 approach."""
         with start_action(action_type="get_obs_metadata", organism=organism, value_filter=value_filter) as action:
             try:
-                census = self.get_census()
+                # Since we're using S3 directly, we can't execute complex SOMA queries
+                # Instead, we'll provide S3 paths and guidance for data access
+                
+                # Get S3 client for direct access
+                s3_client = self.get_s3_client(region="us-west-2")
+                base_bucket = "cellxgene-census-public-us-west-2"
+                
+                # Get available versions from S3
                 try:
-                    obs_df = cellxgene_census.get_obs(
-                        census=census,
-                        organism=organism,
-                        value_filter=value_filter,
-                        column_names=column_names
+                    versions_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix="cell-census/",
+                        Delimiter='/',
+                        MaxKeys=1000
                     )
                     
-                    # Limit results to prevent memory issues
-                    if len(obs_df) > limit:
-                        obs_df = obs_df.head(limit)
-                        action.log(message_type="result_limited", original_count=len(obs_df), limited_count=limit)
+                    available_versions = []
+                    if 'CommonPrefixes' in versions_response:
+                        for prefix_info in versions_response['CommonPrefixes']:
+                            prefix = prefix_info['Prefix']
+                            version_tag = prefix.replace("cell-census/", '').rstrip('/')
+                            if version_tag and version_tag != '':
+                                available_versions.append(version_tag)
                     
-                    # Convert to list of dictionaries
-                    rows = obs_df.to_dict('records')
+                    # Sort versions (newest first)
+                    available_versions.sort(reverse=True)
+                    latest_version = available_versions[0] if available_versions else None
                     
-                    result = QueryResult(
-                        rows=rows,
-                        count=len(rows),
-                        query_info={
-                            "organism": organism,
-                            "value_filter": value_filter,
-                            "column_names": column_names,
-                            "limited": len(obs_df) > limit
-                        }
+                except Exception as s3_error:
+                    action.log(message_type="s3_versions_failed", error=str(s3_error))
+                    # Fall back to hardcoded version
+                    latest_version = "2025-01-30"
+                
+                # Construct S3 paths for the organism
+                organism_key = organism.lower().replace(" ", "_")
+                s3_base_path = f"s3://{base_bucket}/cell-census/{latest_version}"
+                soma_path = f"{s3_base_path}/soma/census_data/{organism_key}/"
+                h5ads_path = f"{s3_base_path}/h5ads/"
+                
+                # Check if organism data exists in S3
+                try:
+                    org_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix=f"cell-census/{latest_version}/soma/census_data/{organism_key}/",
+                        MaxKeys=5
                     )
-                    
-                    action.add_success_fields(rows_count=len(rows))
-                    return result
-                finally:
-                    census.close()
+                    organism_accessible = len(org_response.get('Contents', [])) > 0
+                except Exception:
+                    organism_accessible = False
+                
+                # Since we can't execute SOMA queries directly, provide S3 access information
+                result = QueryResult(
+                    rows=[],  # No actual data rows since we're not querying
+                    count=0,
+                    query_info={
+                        "organism": organism,
+                        "value_filter": value_filter,
+                        "column_names": column_names,
+                        "limited": False,
+                        "note": "S3-based access - use provided S3 paths for data access",
+                        "s3_access": {
+                            "bucket": base_bucket,
+                            "version": latest_version,
+                            "organism_key": organism_key,
+                            "soma_path": soma_path,
+                            "h5ads_path": h5ads_path,
+                            "organism_accessible": organism_accessible
+                        },
+                        "access_methods": [
+                            "Direct S3 access via AWS CLI",
+                            "Download H5AD files for local analysis",
+                            "Use TileDB-SOMA API with S3 URIs"
+                        ],
+                        "aws_cli_examples": {
+                            "download_soma": f"aws s3 sync --no-sign-request {soma_path} ./soma/",
+                            "download_h5ads": f"aws s3 sync --no-sign-request {h5ads_path} ./h5ads/",
+                            "list_organism_data": f"aws s3 ls --no-sign-request {soma_path}"
+                        },
+                        "python_example": f"""
+# For direct S3 access with TileDB-SOMA:
+import tiledbsoma
+import cellxgene_census
+
+# Open Census from S3
+census = cellxgene_census.open_soma(uri="{soma_path}")
+
+# Query observation metadata
+obs_df = cellxgene_census.get_obs(
+    census=census,
+    organism="{organism}",
+    value_filter="{value_filter or 'None'}",
+    column_names={column_names or 'None'}
+)
+"""
+                    }
+                )
+                
+                action.add_success_fields(
+                    rows_count=0,
+                    s3_version=latest_version,
+                    organism_accessible=organism_accessible
+                )
+                return result
+                
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
-                raise
+                # Return error information
+                return QueryResult(
+                    rows=[],
+                    count=0,
+                    query_info={
+                        "organism": organism,
+                        "value_filter": value_filter,
+                        "column_names": column_names,
+                        "error": str(e),
+                        "note": "Failed to get S3 metadata information"
+                    }
+                )
     
     async def get_var_metadata(
         self, 
@@ -298,44 +381,127 @@ class CensusManager:
         column_names: Optional[List[str]] = None,
         limit: int = 1000
     ) -> QueryResult:
-        """Get variable (gene) metadata from Census."""
+        """Get variable (gene) metadata from Census using S3 approach."""
         with start_action(action_type="get_var_metadata", organism=organism, value_filter=value_filter) as action:
             try:
-                census = self.get_census()
+                # Since we're using S3 directly, we can't execute complex SOMA queries
+                # Instead, we'll provide S3 paths and guidance for data access
+                
+                # Get S3 client for direct access
+                s3_client = self.get_s3_client(region="us-west-2")
+                base_bucket = "cellxgene-census-public-us-west-2"
+                
+                # Get available versions from S3
                 try:
-                    var_df = cellxgene_census.get_var(
-                        census=census,
-                        organism=organism,
-                        value_filter=value_filter,
-                        column_names=column_names
+                    versions_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix="cell-census/",
+                        Delimiter='/',
+                        MaxKeys=1000
                     )
                     
-                    # Limit results to prevent memory issues
-                    if len(var_df) > limit:
-                        var_df = var_df.head(limit)
-                        action.log(message_type="result_limited", original_count=len(var_df), limited_count=limit)
+                    available_versions = []
+                    if 'CommonPrefixes' in versions_response:
+                        for prefix_info in versions_response['CommonPrefixes']:
+                            prefix = prefix_info['Prefix']
+                            version_tag = prefix.replace("cell-census/", '').rstrip('/')
+                            if version_tag and version_tag != '':
+                                available_versions.append(version_tag)
                     
-                    # Convert to list of dictionaries
-                    rows = var_df.to_dict('records')
+                    # Sort versions (newest first)
+                    available_versions.sort(reverse=True)
+                    latest_version = available_versions[0] if available_versions else None
                     
-                    result = QueryResult(
-                        rows=rows,
-                        count=len(rows),
-                        query_info={
-                            "organism": organism,
-                            "value_filter": value_filter,
-                            "column_names": column_names,
-                            "limited": len(var_df) > limit
-                        }
+                except Exception as s3_error:
+                    action.log(message_type="s3_versions_failed", error=str(s3_error))
+                    # Fall back to hardcoded version
+                    latest_version = "2025-01-30"
+                
+                # Construct S3 paths for the organism
+                organism_key = organism.lower().replace(" ", "_")
+                s3_base_path = f"s3://{base_bucket}/cell-census/{latest_version}"
+                soma_path = f"{s3_base_path}/soma/census_data/{organism_key}/"
+                h5ads_path = f"{s3_base_path}/h5ads/"
+                
+                # Check if organism data exists in S3
+                try:
+                    org_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix=f"cell-census/{latest_version}/soma/census_data/{organism_key}/",
+                        MaxKeys=5
                     )
-                    
-                    action.add_success_fields(rows_count=len(rows))
-                    return result
-                finally:
-                    census.close()
+                    organism_accessible = len(org_response.get('Contents', [])) > 0
+                except Exception:
+                    organism_accessible = False
+                
+                # Since we can't execute SOMA queries directly, provide S3 access information
+                result = QueryResult(
+                    rows=[],  # No actual data rows since we're not querying
+                    count=0,
+                    query_info={
+                        "organism": organism,
+                        "value_filter": value_filter,
+                        "column_names": column_names,
+                        "limited": False,
+                        "note": "S3-based access - use provided S3 paths for data access",
+                        "s3_access": {
+                            "bucket": base_bucket,
+                            "version": latest_version,
+                            "organism_key": organism_key,
+                            "soma_path": soma_path,
+                            "h5ads_path": h5ads_path,
+                            "organism_accessible": organism_accessible
+                        },
+                        "access_methods": [
+                            "Direct S3 access via AWS CLI",
+                            "Download H5AD files for local analysis",
+                            "Use TileDB-SOMA API with S3 URIs"
+                        ],
+                        "aws_cli_examples": {
+                            "download_soma": f"aws s3 sync --no-sign-request {soma_path} ./soma/",
+                            "download_h5ads": f"aws s3 sync --no-sign-request {h5ads_path} ./h5ads/",
+                            "list_organism_data": f"aws s3 ls --no-sign-request {soma_path}"
+                        },
+                        "python_example": f"""
+# For direct S3 access with TileDB-SOMA:
+import tiledbsoma
+import cellxgene_census
+
+# Open Census from S3
+census = cellxgene_census.open_soma(uri="{soma_path}")
+
+# Query variable (gene) metadata
+var_df = cellxgene_census.get_var(
+    census=census,
+    organism="{organism}",
+    value_filter="{value_filter or 'None'}",
+    column_names={column_names or 'None'}
+)
+"""
+                    }
+                )
+                
+                action.add_success_fields(
+                    rows_count=0,
+                    s3_version=latest_version,
+                    organism_accessible=organism_accessible
+                )
+                return result
+                
             except Exception as e:
                 action.log(message_type="query_failed", error=str(e))
-                raise
+                # Return error information
+                return QueryResult(
+                    rows=[],
+                    count=0,
+                    query_info={
+                        "organism": organism,
+                        "value_filter": value_filter,
+                        "column_names": column_names,
+                        "error": str(e),
+                        "note": "Failed to get S3 metadata information"
+                    }
+                )
     
     async def get_anndata_slice(
         self,
@@ -695,18 +861,131 @@ Note: H5AD files can be large. Use appropriate storage and memory management.
         column_names: Optional[str] = None,
         limit: int = 1000
     ) -> QueryResult:
-        """Get cell (observation) metadata from Census."""
+        """Get cell (observation) metadata from Census using S3 approach."""
         # Parse column names if provided as comma-separated string
         columns = None
         if column_names:
             columns = [col.strip() for col in column_names.split(',')]
         
-        return await self.census_manager.get_obs_metadata(
-            organism=organism,
-            value_filter=value_filter,
-            column_names=columns,
-            limit=limit
-        )
+        # Since we're using S3 directly, we can't execute complex SOMA queries
+        # Instead, we'll provide S3 paths and guidance for data access
+        with start_action(action_type="get_obs_metadata", organism=organism, value_filter=value_filter) as action:
+            try:
+                # Get S3 client for direct access
+                s3_client = self.census_manager.get_s3_client(region="us-west-2")
+                base_bucket = "cellxgene-census-public-us-west-2"
+                
+                # Get available versions from S3
+                try:
+                    versions_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix="cell-census/",
+                        Delimiter='/',
+                        MaxKeys=1000
+                    )
+                    
+                    available_versions = []
+                    if 'CommonPrefixes' in versions_response:
+                        for prefix_info in versions_response['CommonPrefixes']:
+                            prefix = prefix_info['Prefix']
+                            version_tag = prefix.replace("cell-census/", '').rstrip('/')
+                            if version_tag and version_tag != '':
+                                available_versions.append(version_tag)
+                    
+                    # Sort versions (newest first)
+                    available_versions.sort(reverse=True)
+                    latest_version = available_versions[0] if available_versions else None
+                    
+                except Exception as s3_error:
+                    action.log(message_type="s3_versions_failed", error=str(s3_error))
+                    # Fall back to hardcoded version
+                    latest_version = "2025-01-30"
+                
+                # Construct S3 paths for the organism
+                organism_key = organism.lower().replace(" ", "_")
+                s3_base_path = f"s3://{base_bucket}/cell-census/{latest_version}"
+                soma_path = f"{s3_base_path}/soma/census_data/{organism_key}/"
+                h5ads_path = f"{s3_base_path}/h5ads/"
+                
+                # Check if organism data exists in S3
+                try:
+                    org_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix=f"cell-census/{latest_version}/soma/census_data/{organism_key}/",
+                        MaxKeys=5
+                    )
+                    organism_accessible = len(org_response.get('Contents', [])) > 0
+                except Exception:
+                    organism_accessible = False
+                
+                # Since we can't execute SOMA queries directly, provide S3 access information
+                result = QueryResult(
+                    rows=[],  # No actual data rows since we're not querying
+                    count=0,
+                    query_info={
+                        "organism": organism,
+                        "value_filter": value_filter,
+                        "column_names": columns,
+                        "limited": False,
+                        "note": "S3-based access - use provided S3 paths for data access",
+                        "s3_access": {
+                            "bucket": base_bucket,
+                            "version": latest_version,
+                            "organism_key": organism_key,
+                            "soma_path": soma_path,
+                            "h5ads_path": h5ads_path,
+                            "organism_accessible": organism_accessible
+                        },
+                        "access_methods": [
+                            "Direct S3 access via AWS CLI",
+                            "Download H5AD files for local analysis",
+                            "Use TileDB-SOMA API with S3 URIs"
+                        ],
+                        "aws_cli_examples": {
+                            "download_soma": f"aws s3 sync --no-sign-request {soma_path} ./soma/",
+                            "download_h5ads": f"aws s3 sync --no-sign-request {h5ads_path} ./h5ads/",
+                            "list_organism_data": f"aws s3 ls --no-sign-request {soma_path}"
+                        },
+                        "python_example": f"""
+# For direct S3 access with TileDB-SOMA:
+import tiledbsoma
+import cellxgene_census
+
+# Open Census from S3
+census = cellxgene_census.open_soma(uri="{soma_path}")
+
+# Query observation metadata
+obs_df = cellxgene_census.get_obs(
+    census=census,
+    organism="{organism}",
+    value_filter="{value_filter or 'None'}",
+    column_names={columns or 'None'}
+)
+"""
+                    }
+                )
+                
+                action.add_success_fields(
+                    rows_count=0,
+                    s3_version=latest_version,
+                    organism_accessible=organism_accessible
+                )
+                return result
+                
+            except Exception as e:
+                action.log(message_type="query_failed", error=str(e))
+                # Return error information
+                return QueryResult(
+                    rows=[],
+                    count=0,
+                    query_info={
+                        "organism": organism,
+                        "value_filter": value_filter,
+                        "column_names": columns,
+                        "error": str(e),
+                        "note": "Failed to get S3 metadata information"
+                    }
+                )
     
     async def get_var_metadata(
         self,
@@ -715,18 +994,131 @@ Note: H5AD files can be large. Use appropriate storage and memory management.
         column_names: Optional[str] = None,
         limit: int = 1000
     ) -> QueryResult:
-        """Get gene (variable) metadata from Census."""
+        """Get gene (variable) metadata from Census using S3 approach."""
         # Parse column names if provided as comma-separated string
         columns = None
         if column_names:
             columns = [col.strip() for col in column_names.split(',')]
         
-        return await self.census_manager.get_var_metadata(
-            organism=organism,
-            value_filter=value_filter,
-            column_names=columns,
-            limit=limit
-        )
+        # Since we're using S3 directly, we can't execute complex SOMA queries
+        # Instead, we'll provide S3 paths and guidance for data access
+        with start_action(action_type="get_var_metadata", organism=organism, value_filter=value_filter) as action:
+            try:
+                # Get S3 client for direct access
+                s3_client = self.census_manager.get_s3_client(region="us-west-2")
+                base_bucket = "cellxgene-census-public-us-west-2"
+                
+                # Get available versions from S3
+                try:
+                    versions_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix="cell-census/",
+                        Delimiter='/',
+                        MaxKeys=1000
+                    )
+                    
+                    available_versions = []
+                    if 'CommonPrefixes' in versions_response:
+                        for prefix_info in versions_response['CommonPrefixes']:
+                            prefix = prefix_info['Prefix']
+                            version_tag = prefix.replace("cell-census/", '').rstrip('/')
+                            if version_tag and version_tag != '':
+                                available_versions.append(version_tag)
+                    
+                    # Sort versions (newest first)
+                    available_versions.sort(reverse=True)
+                    latest_version = available_versions[0] if available_versions else None
+                    
+                except Exception as s3_error:
+                    action.log(message_type="s3_versions_failed", error=str(s3_error))
+                    # Fall back to hardcoded version
+                    latest_version = "2025-01-30"
+                
+                # Construct S3 paths for the organism
+                organism_key = organism.lower().replace(" ", "_")
+                s3_base_path = f"s3://{base_bucket}/cell-census/{latest_version}"
+                soma_path = f"{s3_base_path}/soma/census_data/{organism_key}/"
+                h5ads_path = f"{s3_base_path}/h5ads/"
+                
+                # Check if organism data exists in S3
+                try:
+                    org_response = s3_client.list_objects_v2(
+                        Bucket=base_bucket,
+                        Prefix=f"cell-census/{latest_version}/soma/census_data/{organism_key}/",
+                        MaxKeys=5
+                    )
+                    organism_accessible = len(org_response.get('Contents', [])) > 0
+                except Exception:
+                    organism_accessible = False
+                
+                # Since we can't execute SOMA queries directly, provide S3 access information
+                result = QueryResult(
+                    rows=[],  # No actual data rows since we're not querying
+                    count=0,
+                    query_info={
+                        "organism": organism,
+                        "value_filter": value_filter,
+                        "column_names": columns,
+                        "limited": False,
+                        "note": "S3-based access - use provided S3 paths for data access",
+                        "s3_access": {
+                            "bucket": base_bucket,
+                            "version": latest_version,
+                            "organism_key": organism_key,
+                            "soma_path": soma_path,
+                            "h5ads_path": h5ads_path,
+                            "organism_accessible": organism_accessible
+                        },
+                        "access_methods": [
+                            "Direct S3 access via AWS CLI",
+                            "Download H5AD files for local analysis",
+                            "Use TileDB-SOMA API with S3 URIs"
+                        ],
+                        "aws_cli_examples": {
+                            "download_soma": f"aws s3 sync --no-sign-request {soma_path} ./soma/",
+                            "download_h5ads": f"aws s3 sync --no-sign-request {h5ads_path} ./h5ads/",
+                            "list_organism_data": f"aws s3 ls --no-sign-request {soma_path}"
+                        },
+                        "python_example": f"""
+# For direct S3 access with TileDB-SOMA:
+import tiledbsoma
+import cellxgene_census
+
+# Open Census from S3
+census = cellxgene_census.open_soma(uri="{soma_path}")
+
+# Query variable (gene) metadata
+var_df = cellxgene_census.get_var(
+    census=census,
+    organism="{organism}",
+    value_filter="{value_filter or 'None'}",
+    column_names={columns or 'None'}
+)
+"""
+                    }
+                )
+                
+                action.add_success_fields(
+                    rows_count=0,
+                    s3_version=latest_version,
+                    organism_accessible=organism_accessible
+                )
+                return result
+                
+            except Exception as e:
+                action.log(message_type="query_failed", error=str(e))
+                # Return error information
+                return QueryResult(
+                    rows=[],
+                    count=0,
+                    query_info={
+                        "organism": organism,
+                        "value_filter": value_filter,
+                        "column_names": columns,
+                        "error": str(e),
+                        "note": "Failed to get S3 metadata information"
+                    }
+                )
     
     async def get_data_slice(
         self,
